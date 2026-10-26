@@ -1,0 +1,22 @@
+# Gradle
+.gradle/
+build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Outputs
+*.apk
+*.aab
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Superpowers scratch workspace
+.superpowers/
