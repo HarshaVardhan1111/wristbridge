@@ -11,9 +11,12 @@ import android.os.IBinder
 import android.util.Log
 import com.wristbridge.R
 import com.wristbridge.TAG
+import com.wristbridge.ble.IphoneLink
 
 /** Foreground service that keeps the iPhone link alive while the screen is off. */
 class BridgeService : Service() {
+
+    private var link: IphoneLink? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -29,6 +32,7 @@ class BridgeService : Service() {
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         Log.i(TAG, "Service started")
+        link = IphoneLink(this).also { it.start() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -36,6 +40,8 @@ class BridgeService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        link?.stop()
+        link = null
         Log.i(TAG, "Service stopped")
         super.onDestroy()
     }
