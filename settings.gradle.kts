@@ -16,6 +16,8 @@ dependencyResolutionManagement {
 
 rootProject.name = "WristBridge"
 
+include(":app")
+
 // Pure-Kotlin protocol logic. An included build, so it builds and tests
 // without the Android SDK: ./gradlew -p protocol test
 includeBuild("protocol")
