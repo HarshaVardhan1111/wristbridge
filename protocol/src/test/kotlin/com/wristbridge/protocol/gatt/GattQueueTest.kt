@@ -29,13 +29,13 @@ class GattQueueTest {
     @Test fun runsOneAtATime() {
         q.enqueue("a") { started += "a"; true }; q.enqueue("b") { started += "b"; true }
         assertEquals(listOf("a"), started)
-        q.complete()
+        q.complete("a")
         assertEquals(listOf("a", "b"), started)
     }
 
     @Test fun startFailureReportsErrorAndClears() {
         q.enqueue("a") { started += "a"; true }; q.enqueue("b") { false }; q.enqueue("c") { started += "c"; true }
-        q.complete() // "b" starts and fails
+        q.complete("a") // "b" starts and fails
         assertEquals("b" to "start failed", errors.single()); assertEquals(listOf("a"), started)
     }
 
@@ -46,18 +46,34 @@ class GattQueueTest {
     }
 
     @Test fun completeCancelsTimeout() {
-        q.enqueue("a") { true }; q.complete()
+        q.enqueue("a") { true }; q.complete("a")
         sched.advance(20_000)
         assertTrue(errors.isEmpty())
     }
 
     @Test fun completeWithNothingRunningIsIgnored() {
-        q.complete(); q.enqueue("a") { started += "a"; true }
+        q.complete("x"); q.enqueue("a") { started += "a"; true }
         assertEquals(listOf("a"), started)
     }
 
     @Test fun worksAgainAfterClear() {
         q.enqueue("a") { true }; q.clear(); q.enqueue("b") { started += "b"; true }
         assertEquals(listOf("b"), started)
+    }
+
+    @Test fun completeForOtherOperationIsIgnored() {
+        q.enqueue("a") { started += "a"; true }; q.enqueue("b") { started += "b"; true }
+        q.complete("late") // e.g. a late callback from an operation that already timed out
+        assertEquals(listOf("a"), started)
+        q.complete("a")
+        assertEquals(listOf("a", "b"), started)
+    }
+
+    @Test fun perOperationTimeoutOverridesDefault() {
+        q.enqueue("slow", timeoutMs = 30_000) { true }
+        sched.advance(10_000)
+        assertTrue(errors.isEmpty())
+        sched.advance(20_000)
+        assertEquals("slow" to "timeout", errors.single())
     }
 }

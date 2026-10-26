@@ -68,6 +68,7 @@ class IphoneLink(private val context: Context) {
     private var backoffMs = INITIAL_BACKOFF_MS
     private var pendingRestart: Runnable? = null
     private var responseTimer: Runnable? = null
+    private var discoveryWatchdog: Runnable? = null
 
     fun start() {
         if (running) return
@@ -98,8 +99,21 @@ class IphoneLink(private val context: Context) {
             state = State.IDLE
             return
         }
-        if (!server.open()) Log.w(TAG, "GATT server failed to open")
         state = State.ADVERTISING
+        if (!server.open()) {
+            Log.w(TAG, "GATT server failed to open")
+            tearDown(restart = true)
+            return
+        }
+        // After a reinstall or a process restart the iPhone may still be connected.
+        // It won't connect again, so adopt the existing link.
+        val connected = manager.getConnectedDevices(BluetoothProfile.GATT_SERVER)
+            .firstOrNull { it.bondState == BluetoothDevice.BOND_BONDED }
+        if (connected != null) {
+            Log.i(TAG, "iPhone already connected")
+            onServerConnectionChange(connected, connected = true)
+            return
+        }
         advertiser.start(Advertiser.Mode.PAIRING) { ok ->
             handler.post { if (!ok && state == State.ADVERTISING) tearDown(restart = true) }
         }
@@ -158,25 +172,42 @@ class IphoneLink(private val context: Context) {
         session.end()
         cancelResponseTimer()
         queue.clear()
+        startDiscoveryWatchdog()
         queue.enqueue(OP_REQUEST_MTU) { gatt.requestMtu(MTU) }
         queue.enqueue(OP_DISCOVER) { gatt.discoverServices() }
     }
 
-    private fun subscribe(gatt: BluetoothGatt) {
-        val serviceChanged = gatt.getService(AncsUuids.GATT_SERVICE)?.getCharacteristic(AncsUuids.SERVICE_CHANGED)
-        if (serviceChanged?.getDescriptor(AncsUuids.CCCD) != null) {
-            enableUpdates(gatt, serviceChanged, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
+    /** If ANCS isn't subscribed in time (for example iOS hasn't published it), start over. */
+    private fun startDiscoveryWatchdog() {
+        cancelDiscoveryWatchdog()
+        val watchdog = Runnable {
+            discoveryWatchdog = null
+            if (state == State.DISCOVERING) {
+                Log.w(TAG, "ANCS not ready after ${DISCOVERY_WATCHDOG_MS / 1000} s; reconnecting")
+                tearDown(restart = true)
+            }
         }
+        discoveryWatchdog = watchdog
+        handler.postDelayed(watchdog, DISCOVERY_WATCHDOG_MS)
+    }
+
+    private fun cancelDiscoveryWatchdog() {
+        discoveryWatchdog?.let { handler.removeCallbacks(it) }
+        discoveryWatchdog = null
+    }
+
+    private fun subscribe(gatt: BluetoothGatt) {
+        // Service Changed is handled by Android itself and reported through onServiceChanged().
         val ancs = gatt.getService(AncsUuids.SERVICE)
         if (ancs == null) {
-            Log.w(TAG, "ANCS not found")
+            Log.w(TAG, "ANCS not found; waiting for Service Changed")
             return
         }
         val dataSource = ancs.getCharacteristic(AncsUuids.DATA_SOURCE)
         val notificationSource = ancs.getCharacteristic(AncsUuids.NOTIFICATION_SOURCE)
         controlPoint = ancs.getCharacteristic(AncsUuids.CONTROL_POINT)
         if (dataSource == null || notificationSource == null || controlPoint == null) {
-            Log.w(TAG, "ANCS characteristics missing")
+            Log.w(TAG, "ANCS characteristics missing; waiting for Service Changed")
             return
         }
         Log.i(TAG, "ANCS found")
@@ -186,7 +217,8 @@ class IphoneLink(private val context: Context) {
     }
 
     private fun enableUpdates(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-        queue.enqueue("subscribe ${characteristic.uuid}") {
+        // Long timeout: iOS may wait for the user to tap "Allow notifications".
+        queue.enqueue(subscribeOp(characteristic.uuid), SUBSCRIBE_TIMEOUT_MS) {
             val cccd = characteristic.getDescriptor(AncsUuids.CCCD)
             cccd != null &&
                 gatt.setCharacteristicNotification(characteristic, true) &&
@@ -197,10 +229,16 @@ class IphoneLink(private val context: Context) {
     private fun onSubscribeResult(uuid: UUID, status: Int) {
         if (status != BluetoothGatt.GATT_SUCCESS) {
             Log.w(TAG, "Subscribe failed $uuid status $status")
-            if (uuid != AncsUuids.SERVICE_CHANGED) tearDown(restart = true)
+            if (status == BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION ||
+                status == BluetoothGatt.GATT_INSUFFICIENT_ENCRYPTION
+            ) {
+                Log.w(TAG, "The watch may hold an old bond with this iPhone. See docs/PHASE1-TEST.md, step 1.")
+            }
+            tearDown(restart = true)
             return
         }
         if (uuid == AncsUuids.NOTIFICATION_SOURCE) {
+            cancelDiscoveryWatchdog()
             state = State.SUBSCRIBED
             backoffMs = INITIAL_BACKOFF_MS
             Log.i(TAG, "ANCS subscribed")
@@ -225,6 +263,7 @@ class IphoneLink(private val context: Context) {
 
     private fun closeLink() {
         cancelResponseTimer()
+        cancelDiscoveryWatchdog()
         session.end()
         queue.clear()
         advertiser.stop()
@@ -286,11 +325,11 @@ class IphoneLink(private val context: Context) {
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) = onMain(g) {
             Log.i(TAG, "MTU $mtu")
-            queue.complete()
+            queue.complete(OP_REQUEST_MTU)
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) = onMain(g) {
-            queue.complete()
+            queue.complete(OP_DISCOVER)
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 subscribe(g)
             } else {
@@ -300,30 +339,32 @@ class IphoneLink(private val context: Context) {
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) = onMain(g) {
-            queue.complete()
+            queue.complete(subscribeOp(descriptor.characteristic.uuid))
             onSubscribeResult(descriptor.characteristic.uuid, status)
         }
 
         override fun onCharacteristicWrite(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) =
             onMain(g) {
-                queue.complete()
+                queue.complete(OP_WRITE_CONTROL_POINT)
                 if (characteristic.uuid == AncsUuids.CONTROL_POINT && status != BluetoothGatt.GATT_SUCCESS) {
                     session.onControlPointWriteFailed(status)
                 }
             }
 
-        // API 33 overload. Android 13 also calls the old overload; we override only this one.
+        // API 33 overload. Its default implementation calls the old one, so we override only this one.
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) =
             onMain(g) {
                 when (characteristic.uuid) {
                     AncsUuids.NOTIFICATION_SOURCE -> session.onNotificationSource(value)
                     AncsUuids.DATA_SOURCE -> session.onDataSource(value)
-                    AncsUuids.SERVICE_CHANGED -> {
-                        Log.i(TAG, "Service Changed; discovering again")
-                        discover()
-                    }
                 }
             }
+
+        // Android consumes Service Changed indications and reports them here (API 31+).
+        override fun onServiceChanged(g: BluetoothGatt) = onMain(g) {
+            Log.i(TAG, "Service Changed; discovering again")
+            discover()
+        }
 
         /** Runs [block] on the main thread, unless [g] is an old, closed connection. */
         private fun onMain(g: BluetoothGatt, block: () -> Unit) {
@@ -335,7 +376,7 @@ class IphoneLink(private val context: Context) {
         override fun writeControlPoint(command: ByteArray) {
             val gatt = gatt ?: return
             val characteristic = controlPoint ?: return
-            queue.enqueue("writeControlPoint") {
+            queue.enqueue(OP_WRITE_CONTROL_POINT) {
                 gatt.writeCharacteristic(characteristic, command, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
                     BluetoothStatusCodes.SUCCESS
             }
@@ -375,6 +416,11 @@ class IphoneLink(private val context: Context) {
         const val MTU = 185
         const val OP_REQUEST_MTU = "requestMtu"
         const val OP_DISCOVER = "discoverServices"
+        const val OP_WRITE_CONTROL_POINT = "writeControlPoint"
+        const val SUBSCRIBE_TIMEOUT_MS = 30_000L
+        const val DISCOVERY_WATCHDOG_MS = 60_000L
+
+        fun subscribeOp(uuid: UUID) = "subscribe $uuid"
         const val INITIAL_BACKOFF_MS = 2_000L
         const val MAX_BACKOFF_MS = 300_000L
     }

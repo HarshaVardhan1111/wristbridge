@@ -14,20 +14,24 @@ class GattQueue(
     private val timeoutMs: Long = 10_000,
     private val onError: (operation: String, reason: String) -> Unit,
 ) {
-    private class Operation(val name: String, val start: () -> Boolean)
+    private class Operation(val name: String, val timeoutMs: Long, val start: () -> Boolean)
 
     private val pending = ArrayDeque<Operation>()
     private var running: Operation? = null
     private var timer: Cancellable? = null
 
-    fun enqueue(name: String, start: () -> Boolean) {
-        pending.addLast(Operation(name, start))
+    fun enqueue(name: String, timeoutMs: Long = this.timeoutMs, start: () -> Boolean) {
+        pending.addLast(Operation(name, timeoutMs, start))
         startNext()
     }
 
-    /** Call from the GATT callback of the current operation. */
-    fun complete() {
-        if (running == null) return
+    /**
+     * Call from the GATT callback of operation [name]. Ignored unless [name]
+     * is the running operation, so a late callback (for example after a
+     * timeout) cannot complete a different operation.
+     */
+    fun complete(name: String) {
+        if (running?.name != name) return
         timer?.cancel()
         timer = null
         running = null
@@ -45,7 +49,7 @@ class GattQueue(
         if (running != null) return
         val op = pending.removeFirstOrNull() ?: return
         running = op
-        timer = scheduler.schedule(timeoutMs) { fail(op, "timeout") }
+        timer = scheduler.schedule(op.timeoutMs) { fail(op, "timeout") }
         if (!op.start()) fail(op, "start failed")
     }
 

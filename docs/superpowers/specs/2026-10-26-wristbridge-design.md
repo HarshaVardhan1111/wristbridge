@@ -104,8 +104,11 @@ and ends on unsubscribe or disconnect. All UIDs and data are valid only
 within one session. On a new session, iOS re-sends existing notifications
 with the PreExisting flag.
 
-We should also subscribe to the GATT Service Changed characteristic
-(`0x2A05`), because ANCS and AMS can appear and disappear.
+Apple says to watch the GATT Service Changed characteristic (`0x2A05`),
+because ANCS and AMS can appear and disappear. On Android the system
+handles Service Changed itself and tells the app through
+`BluetoothGattCallback.onServiceChanged()` (API 31+), so the app listens
+there instead of subscribing itself.
 
 ### AMS
 
@@ -234,10 +237,12 @@ on 13).
 | GATT status 133 or other GATT error | `close()` the GATT object. Retry with backoff 2s, 4s, 8s … max 5 min. |
 | Control Point error 0xA0–0xA3 | Log it, drop that request, continue with the next one. |
 | Data Source response not complete after 5s | Drop the partial data, continue with the next request. |
-| GATT operation gets no callback | `GattQueue` timeout (10s), then treat as GATT error. |
+| GATT operation gets no callback | `GattQueue` timeout (10s; 30s for subscribe writes, because iOS may wait for the user to tap "Allow notifications"), then treat as GATT error. A late callback for an older operation is ignored. |
 | Bluetooth turned off | Stop everything. Restart when `ACTION_STATE_CHANGED = ON`. |
 | Many PreExisting events on connect | Phase 1: log only, don't fetch text. |
-| ANCS not found after discovery | Log clearly. Wait for Service Changed, then rediscover. |
+| ANCS not found after discovery | Log clearly. Wait for `onServiceChanged`, then rediscover. If ANCS is still not subscribed 60s after discovery started, start over. |
+| iPhone already connected when the app starts (reinstall, process restart) | Adopt the existing bonded connection instead of waiting for a new one. |
+| GATT server fails to open | Treat as a link error (back off and retry). |
 
 ## 7. Phases and test checklists
 

@@ -11,6 +11,9 @@ Merge and WristBridge would fight over the same Bluetooth link.
 2. On the iPhone: **Settings > Bluetooth**. Tap the **(i)** next to the
    watch, then **Forget This Device**.
 3. On the iPhone: delete the **Merge** app, so it can't reconnect.
+4. On the watch: **Settings > Connections > Bluetooth**. If your iPhone is
+   in the list, tap it and choose **Unpair**. (If it is not in the list,
+   skip this.) An old bond from Merge can make the first pairing fail.
 
 ## 2. Install and start WristBridge
 
@@ -64,8 +67,15 @@ missing line means:
 | `Service started`, then `Advertising failed: …` | Samsung blocks advertising for apps | Stop and report it: the whole plan depends on this |
 | `Advertising started`, but the watch isn't in the iPhone list | iOS doesn't list it | Install **nRF Connect** on the iPhone, scan, find the watch, tap **Connect** |
 | `iPhone connected`, but no `Bonded` | Pairing didn't finish | Accept the prompts on both devices; try again |
+| `Bonded (already)` on the very first pairing, then `Subscribe failed … status 5` (or 15) | The watch kept an old bond from Merge | Do step 1.4 again, then forget the watch on the iPhone and pair again |
 | `Bonded`, but no `ANCS subscribed` | Subscribing failed | Send the log |
 | `ANCS subscribed`, but no `Notification:` | Fetching failed | Send the log |
+
+## After you reinstall the app
+
+The iPhone may stay connected while the app restarts. The app tries to pick
+up that connection by itself (`iPhone already connected` in the log). If
+nothing happens, turn Bluetooth off and on again on the iPhone.
 
 ## Tip
 
