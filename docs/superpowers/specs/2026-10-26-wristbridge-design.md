@@ -39,7 +39,7 @@ accessory services:
 | Risk | What we expect | How Phase 1 shows it |
 | --- | --- | --- |
 | Samsung lets a normal app advertise over BLE | Likely yes (`isMultipleAdvertisementSupported`) | Log line `Advertising started` |
-| iPhone lists the watch in Settings > Bluetooth | Likely yes, because the ad solicits ANCS | You see "WristBridge" in the list |
+| iPhone lists the watch in Settings > Bluetooth | Likely yes, because the ad solicits ANCS | You see the watch's Bluetooth name in the list |
 | iOS lets the watch subscribe to ANCS after bonding | Yes, this is ANCS's normal use | Log line `ANCS subscribed` |
 | Android recognises the iPhone's rotating address after bonding (needed for reconnect option B) | Unknown | Tested in Phase 5 |
 
@@ -136,8 +136,11 @@ We should also subscribe to the GATT Service Changed characteristic
   The watch is API 33, so this works.
 - Main advertisement: flags + 128-bit ANCS solicitation UUID
   (3 + 18 = 21 bytes, under the 31-byte limit).
-- Scan response: device name "WristBridge". The name does not fit in the
-  main packet together with the 128-bit UUID.
+- Scan response: the device name. The name does not fit in the main
+  packet together with the 128-bit UUID. Android always advertises the
+  watch's own Bluetooth name (for example "Galaxy Watch6 Classic (XXXX)").
+  The app does not rename the watch's Bluetooth; the user can rename the
+  watch in its own settings if they want.
 - Connectable: yes.
 
 ## 4. Architecture
@@ -146,7 +149,9 @@ Two Gradle modules.
 
 ### `:protocol` (pure Kotlin/JVM, no Android)
 
-Unit-tested on a computer. Holds every byte-level rule.
+Unit-tested on a computer. Holds every byte-level rule, plus all
+logic that does not need Android, so it can be tested without the watch
+or the Android SDK.
 
 - `ancs/AncsUuids` and `ancs/AncsIds`: constants from section 3.
 - `ancs/NotificationSourceEvent`: parses the 8-byte packet.
@@ -155,6 +160,11 @@ Unit-tested on a computer. Holds every byte-level rule.
 - `ancs/DataSourceAssembler`: joins the pieces of a response into a whole
   response. Knows which attributes were requested, so it knows when
   the response is complete.
+- `ancs/AncsSession`: the ANCS logic for one session. Decides which
+  events to fetch, sends one request at a time, handles errors and
+  timeouts, forgets everything when the session ends.
+- `gatt/GattQueue`: runs one GATT operation at a time (Android allows only
+  one in flight). Each operation has a timeout.
 - `ams/` (Phase 4): constants, Entity Update parser, command builders.
 
 ### `:app` (Wear OS, Android)
@@ -164,8 +174,6 @@ Unit-tested on a computer. Holds every byte-level rule.
   (low power, the backup reconnect path from option C).
 - `ble/GattServer`: an empty `BluetoothGattServer`. Its only job is to
   tell us when the iPhone connects to the watch.
-- `ble/GattQueue`: runs one GATT operation at a time (Android allows only
-  one in flight). Each operation has a timeout.
 - `ble/IphoneLink`: the state machine.
   `Idle → Advertising → Connected → Bonding → Discovering → Subscribed`,
   plus `Reconnecting` on link loss.
@@ -191,7 +199,7 @@ on 13).
    starts `BridgeService`.
 2. The service opens the empty GATT server and starts the *pairing*
    advertisement.
-3. On the iPhone: Settings > Bluetooth > tap "WristBridge".
+3. On the iPhone: Settings > Bluetooth > tap the watch's name.
 4. `GattServer` reports the connected device. Advertising stops.
    The watch calls `device.connectGatt(..., TRANSPORT_LE)` on the same
    link.
@@ -256,7 +264,7 @@ Each phase stops so the user can test on the real watch.
 
 - `:protocol`: JUnit tests written before the code (test-first). Test data
   is built from the byte layouts in section 3. Run with
-  `gradlew :protocol:test`.
+  `gradlew -p protocol test` (`:protocol` is an included build, so it builds without the Android SDK).
 - `:app`: manual tests on the watch, with the checklists in section 7.
   Logcat tag `WristBridge`.
 - Limit: Claude cannot run anything on the watch. Claude will try to build
